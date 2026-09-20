@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { computeImposition } = require('../src/imposition');
+const { suggestNextObservation } = require('../src/verification');
 
 const BASE = { totalPages: 8, sheetsPerSignature: 2, binding: 'left', flip: 'short' };
 // 基准布局（左装订 / 短边翻转），第 1 帖：
@@ -351,3 +352,318 @@ test('12 条观察可正常核验：由基准结果生成的观察唯一对应�
   assert.equal(v.conclusion.status, 'verified');
   assert.equal(v.conclusion.matchesCurrent, true);
 });
+
+/* ------------------------------ 下一处观察建议 ------------------------------ */
+
+test('建议：两组合并列时给出区分页位（背面优先），含定位与各候选预期值', () => {
+  // 仅观察正面左页位第 8 页：左装订两种翻转并列；最早枚举的可区分页位为第 1 张背面左页位
+  const v = verify([obs({})]);
+  assert.equal(v.conclusion.status, 'undetermined');
+  const s = v.conclusion.suggestion;
+  assert.equal(s.available, true);
+  assert.deepEqual(s.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+  assert.equal(s.outcomeGroups, 2);
+  assert.equal(s.worstCaseRemaining, 1);
+  assert.deepEqual(
+    s.expectations.map((e) => [e.binding, e.flip, e.blank ? null : e.page, e.blank ? null : e.orientation]),
+    [
+      ['left', 'short', 2, 'upright'],
+      ['left', 'long', 7, 'rotated'],
+    ]
+  );
+  s.expectations.forEach((e) => assert.equal(e.tied, true));
+  assert.match(s.message, /第 1 帖/);
+  assert.match(s.message, /第 1 张/);
+  assert.match(s.message, /背面/);
+  assert.match(s.message, /左页位/);
+  assert.match(s.message, /第 2 页/);
+  assert.match(s.message, /第 7 页/);
+});
+
+test('建议：四组合并列时选择结果分组最多、最坏剩余最少的页位', () => {
+  // 10 页 2 张/帖，观察第 2 帖第 2 张空白页位：四种组合全部零差异并列
+  const v = computeImposition({
+    ...BASE,
+    totalPages: 10,
+    observations: [{ signature: 2, sheet: 2, side: 'front', position: 'left', page: null, orientation: 'rotated' }],
+  }).verification;
+  assert.equal(v.conclusion.status, 'undetermined');
+  assert.equal(v.conclusion.tied.length, 4);
+  const s = v.conclusion.suggestion;
+  assert.equal(s.available, true);
+  // 第 1 帖第 1 张背面左页位四种组合给出 4 种结果：2/正、7/倒、7/正、2/倒
+  assert.deepEqual(s.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+  assert.equal(s.outcomeGroups, 4);
+  assert.equal(s.worstCaseRemaining, 1);
+  assert.equal(s.expectations.length, 4);
+  assert.deepEqual(
+    s.expectations.map((e) => (e.blank ? 'blank' : `${e.page}/${e.orientation}`)),
+    ['2/upright', '7/rotated', '7/upright', '2/rotated']
+  );
+});
+
+test('建议：剩余未观察页位在并列组合下全部相同 → 明确返回无建议（indistinguishable）', () => {
+  // 1 页 1 张：左装订两种翻转下全部页位相同（背面均空白）。观察 3 个页位、留 1 个未观察，
+  // 并列仍在，但剩余页位无法区分
+  const v = computeImposition({
+    totalPages: 1,
+    sheetsPerSignature: 1,
+    binding: 'left',
+    flip: 'short',
+    observations: [
+      { signature: 1, sheet: 1, side: 'front', position: 'left', page: null, orientation: 'upright' },
+      { signature: 1, sheet: 1, side: 'front', position: 'right', page: 1, orientation: 'upright' },
+      { signature: 1, sheet: 1, side: 'back', position: 'left', page: null, orientation: 'upright' },
+    ],
+  }).verification;
+  assert.equal(v.conclusion.status, 'undetermined');
+  assert.deepEqual(v.conclusion.tied, [
+    { binding: 'left', flip: 'short' },
+    { binding: 'left', flip: 'long' },
+  ]);
+  const s = v.conclusion.suggestion;
+  assert.equal(s.available, false);
+  assert.equal(s.reason, 'indistinguishable');
+  assert.equal(s.location, undefined);
+  assert.match(s.message, /无法继续区分|再观察/);
+});
+
+test('建议：全部页位均已观察仍并列 → 明确返回无建议（no-unobserved-slot）', () => {
+  // 1 页 1 张共 4 个页位，全部观察：左装订两翻转仍并列（背面无内容朝向可比）
+  const v = computeImposition({
+    totalPages: 1,
+    sheetsPerSignature: 1,
+    binding: 'left',
+    flip: 'short',
+    observations: [
+      { signature: 1, sheet: 1, side: 'front', position: 'left', page: null, orientation: 'upright' },
+      { signature: 1, sheet: 1, side: 'front', position: 'right', page: 1, orientation: 'upright' },
+      { signature: 1, sheet: 1, side: 'back', position: 'left', page: null, orientation: 'upright' },
+      { signature: 1, sheet: 1, side: 'back', position: 'right', page: null, orientation: 'upright' },
+    ],
+  }).verification;
+  assert.equal(v.conclusion.status, 'undetermined');
+  const s = v.conclusion.suggestion;
+  assert.equal(s.available, false);
+  assert.equal(s.reason, 'no-unobserved-slot');
+  assert.equal(s.location, undefined);
+  assert.match(s.message, /已无未观察页位/);
+});
+
+test('建议：已观察页位被排除，新增观察后建议位置随之推进', () => {
+  // 观察正面左页位第 8 页时建议第 1 张背面左页位；把该页位也观察掉（短边正向第 2 页）后，
+  // 组合唯一对应 → verified，不再带建议
+  const before = verify([obs({})]);
+  assert.deepEqual(before.conclusion.suggestion.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+  const after = verify([
+    obs({}),
+    obs({ side: 'back', position: 'left', page: 2, orientation: 'upright' }),
+  ]);
+  assert.equal(after.conclusion.status, 'verified');
+  assert.equal(after.conclusion.suggestion, undefined);
+});
+
+test('建议：非并列结论（verified / failed）不附 suggestion', () => {
+  const verified = verify([
+    obs({}),
+    obs({ side: 'back', page: 2, orientation: 'upright' }),
+  ]);
+  assert.equal(verified.conclusion.status, 'verified');
+  assert.equal(verified.conclusion.suggestion, undefined);
+
+  const failed = verify([
+    obs({ side: 'back', position: 'left', page: 2, orientation: 'upright' }),
+    obs({ side: 'back', position: 'right', page: 7, orientation: 'upright' }),
+    obs({ side: 'front', position: 'left', page: 1, orientation: 'upright' }),
+  ]);
+  assert.equal(failed.conclusion.status, 'failed');
+  assert.equal(failed.conclusion.suggestion, undefined);
+});
+
+test('建议：多帖时定位取最早可区分页位（帖 / 张顺序优先）', () => {
+  // 16 页、每帖 1 张共 4 帖；仅观察第 4 帖正面左页位（左装订两翻转并列），
+  // 建议仍应指向第 1 帖第 1 张背面左页位
+  const base = { totalPages: 16, sheetsPerSignature: 1, binding: 'left', flip: 'short' };
+  const slot = computeImposition(base).signatures[3].sheets[0].front.left;
+  const v = computeImposition({
+    ...base,
+    observations: [
+      { signature: 4, sheet: 1, side: 'front', position: 'left', page: slot.page, orientation: 'upright' },
+    ],
+  }).verification;
+  assert.equal(v.conclusion.status, 'undetermined');
+  assert.deepEqual(v.conclusion.suggestion.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+});
+
+test('建议：均衡 / 章节分帖下按各帖实际张数枚举，正常给出建议', () => {
+  // 均衡分帖 17 页：各帖实际张数 [2,2,1]
+  const balanced = computeImposition({
+    totalPages: 17,
+    sheetsPerSignature: 2,
+    binding: 'left',
+    flip: 'short',
+    balancedSplit: true,
+    observations: [{ signature: 3, sheet: 1, side: 'front', position: 'right', page: 17, orientation: 'upright' }],
+  }).verification;
+  assert.equal(balanced.conclusion.status, 'undetermined');
+  assert.equal(balanced.conclusion.suggestion.available, true);
+  assert.deepEqual(balanced.conclusion.suggestion.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+
+  // 章节优先分帖：3 帖
+  const chapter = computeImposition({
+    totalPages: 20,
+    sheetsPerSignature: 2,
+    binding: 'left',
+    flip: 'short',
+    chapterSplit: true,
+    chapterStarts: [1, 9, 14, 18],
+    observations: [{ signature: 1, sheet: 1, side: 'front', position: 'left', page: 8, orientation: 'upright' }],
+  }).verification;
+  assert.equal(chapter.conclusion.status, 'undetermined');
+  assert.equal(chapter.conclusion.suggestion.available, true);
+  assert.deepEqual(chapter.conclusion.suggestion.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+});
+
+/* ---------- 纯算法单测：构造最小布局验证 minimax 与各项并列打破规则 ---------- */
+
+/**
+ * 构造单帖单张的最小拼版布局：slotSpec[side][position] 为 { page } 或 null（空白）。
+ */
+function fakeLayout(combo, slotSpec) {
+  const mk = (spec) => (spec === null ? { page: null, blank: true } : { page: spec.page, blank: false });
+  return {
+    input: { binding: combo.binding, flip: combo.flip },
+    signatures: [{
+      sheets: [{
+        front: { left: mk(slotSpec.front.left), right: mk(slotSpec.front.right) },
+        back: { left: mk(slotSpec.back.left), right: mk(slotSpec.back.right) },
+      }],
+    }],
+  };
+}
+
+/** 以 { 'binding/flip': slotSpec } 构造 layoutMap。 */
+function fakeLayoutMap(tied, specsByKey) {
+  const map = new Map();
+  tied.forEach((combo) => map.set(`${combo.binding}/${combo.flip}`, fakeLayout(combo, specsByKey[`${combo.binding}/${combo.flip}`])));
+  return map;
+}
+
+const TIED2 = [{ binding: 'left', flip: 'short' }, { binding: 'left', flip: 'long' }];
+const STRUCT11 = { signatureCount: 1, sheetCounts: [1] };
+
+test('算法：首要目标为最小化最坏剩余候选数（最坏值优先于枚举顺序）', () => {
+  // 四个并列组合。先枚举到的 front/left：3 空白 + 1 页码 -> 分组 2、最坏 3；
+  // back/left：2 空白 + 2 个不同页码 -> 分组 2、最坏 2。
+  // 分组数相同但最坏值更小 -> 尽管正面更靠前枚举，仍选背面左页位（minimax 优先）。
+  const tied = [
+    { binding: 'left', flip: 'short' },
+    { binding: 'left', flip: 'long' },
+    { binding: 'right', flip: 'short' },
+    { binding: 'right', flip: 'long' },
+  ];
+  const specsByKey = {
+    'left/short': { front: { left: null, right: null }, back: { left: { page: 9 }, right: null } },
+    'left/long': { front: { left: null, right: null }, back: { left: null, right: null } },
+    'right/short': { front: { left: null, right: null }, back: { left: { page: 9 }, right: null } },
+    'right/long': { front: { left: { page: 1 }, right: null }, back: { left: null, right: null } },
+  };
+  const s = suggestNextObservation(tied, fakeLayoutMap(tied, specsByKey), [], STRUCT11);
+  assert.equal(s.available, true);
+  assert.deepEqual(s.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+  assert.equal(s.outcomeGroups, 2);
+  assert.equal(s.worstCaseRemaining, 2);
+});
+
+test('算法：最坏剩余与分组数相同时，非空白结果分组多者优先', () => {
+  // front/left：空白 + 页码 1（1 个非空白分组）；front/right：页码 1 + 页码 2（2 个非空白分组）
+  // 两者分组均为 2、最坏均为 1、同为正面 -> 选非空白分组更多的 front/right
+  const specsByKey = {
+    'left/short': { front: { left: null, right: { page: 1 } }, back: { left: null, right: null } },
+    'left/long': { front: { left: { page: 1 }, right: { page: 2 } }, back: { left: { page: 1 }, right: null } },
+  };
+  const s = suggestNextObservation(TIED2, fakeLayoutMap(TIED2, specsByKey), [], STRUCT11);
+  assert.equal(s.available, true);
+  assert.deepEqual(s.location, { signature: 1, sheet: 1, side: 'front', position: 'right' });
+  assert.equal(s.outcomeGroups, 2);
+});
+
+test('算法：前三项并列时背面优先于正面，随后按左页位优先', () => {
+  // 正面左右与背面左右都给出同样的「空白 vs 页码 1」二分（最坏 1、分组 2、非空白 1），
+  // 背面优先 -> 背面内左先于右
+  const specsByKey = {
+    'left/short': {
+      front: { left: null, right: null },
+      back: { left: null, right: null },
+    },
+    'left/long': {
+      front: { left: { page: 1 }, right: { page: 1 } },
+      back: { left: { page: 1 }, right: { page: 1 } },
+    },
+  };
+  const s = suggestNextObservation(TIED2, fakeLayoutMap(TIED2, specsByKey), [], STRUCT11);
+  assert.deepEqual(s.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+});
+
+test('算法：背面两个页位完全等分时取枚举靠前者（左页位）', () => {
+  // 正面在两组合下完全相同（不可区分）；背面左右均为「空白 vs 页码 3/倒置」二分，
+  // 各项分数一致 -> 左页位先于右页位
+  const specsByKey = {
+    'left/short': {
+      front: { left: { page: 1 }, right: { page: 1 } },
+      back: { left: null, right: null },
+    },
+    'left/long': {
+      front: { left: { page: 1 }, right: { page: 1 } },
+      back: { left: { page: 3 }, right: { page: 3 } },
+    },
+  };
+  const s = suggestNextObservation(TIED2, fakeLayoutMap(TIED2, specsByKey), [], STRUCT11);
+  assert.deepEqual(s.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+});
+
+test('算法：所有未观察页位签名一致 → 无建议（indistinguishable）', () => {
+  const spec = { front: { left: { page: 1 }, right: null }, back: { left: null, right: null } };
+  const specsByKey = { 'left/short': spec, 'left/long': spec };
+  // 正面左页位已观察，其余全部相同
+  const s = suggestNextObservation(
+    TIED2,
+    fakeLayoutMap(TIED2, specsByKey),
+    [{ signature: 1, sheet: 1, side: 'front', position: 'left' }],
+    STRUCT11
+  );
+  assert.equal(s.available, false);
+  assert.equal(s.reason, 'indistinguishable');
+});
+
+test('算法：无未观察页位 → 无建议（no-unobserved-slot）', () => {
+  const spec = { front: { left: { page: 1 }, right: null }, back: { left: null, right: null } };
+  const specsByKey = { 'left/short': spec, 'left/long': spec };
+  const observations = [];
+  for (const side of ['front', 'back']) {
+    for (const position of ['left', 'right']) {
+      observations.push({ signature: 1, sheet: 1, side, position });
+    }
+  }
+  const s = suggestNextObservation(TIED2, fakeLayoutMap(TIED2, specsByKey), observations, STRUCT11);
+  assert.equal(s.available, false);
+  assert.equal(s.reason, 'no-unobserved-slot');
+});
+
+test('算法：期望中的空白页不带朝向（orientation 为 null），非空白按翻转给朝向', () => {
+  // 背面左页位：短边为空白、长边为第 2 页倒置
+  const specsByKey = {
+    'left/short': { front: { left: { page: 1 }, right: null }, back: { left: null, right: null } },
+    'left/long': { front: { left: { page: 1 }, right: null }, back: { left: { page: 2 }, right: null } },
+  };
+  const s = suggestNextObservation(TIED2, fakeLayoutMap(TIED2, specsByKey), [], STRUCT11);
+  assert.deepEqual(s.location, { signature: 1, sheet: 1, side: 'back', position: 'left' });
+  assert.deepEqual(
+    s.expectations.map((e) => ({ blank: e.blank, page: e.page, orientation: e.orientation })),
+    [
+      { blank: true, page: null, orientation: null },
+      { blank: false, page: 2, orientation: 'rotated' },
+    ]
+  );
+});
+

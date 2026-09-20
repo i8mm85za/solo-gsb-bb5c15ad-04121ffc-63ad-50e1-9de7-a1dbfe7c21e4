@@ -49,6 +49,9 @@ const { attachVerification } = require('./verification');
  *   服务端用同一输入重算「左/右装订 × 长/短边翻转」四种设置并逐条比对，
  *   按「错误观察数最少 → 错误字段数最少 → 当前设置优先 → 固定组合顺序」排序候选；
  *   仅唯一零差异组合判定验证通过，并列最优时返回无法判定及并列组合（不强行推荐）。
+ * - 无法判定时从尚未观察的页位中计算「下一处观察建议」：以最小化最坏情况下剩余候选数
+ *   为首要目标，再按结果分组数、非空白结果、背面优先、帖/张/页位顺序确定唯一建议；
+ *   所有页位都不能继续区分或已全部观察时明确返回无建议（详见 verification.js）。
  * - 非法索引、重复观察返回明确错误；无观察（缺省 / 空数组）时 verification 为
  *   { enabled: false }，原流程完全不变。
  */
@@ -437,7 +440,7 @@ function computeImposition(input) {
   const result = {
     meta: {
       app: 'saddle-stitch-imposition',
-      version: '1.5.0',
+      version: '1.6.0',
       generatedAt: new Date().toISOString(),
     },
     input: {

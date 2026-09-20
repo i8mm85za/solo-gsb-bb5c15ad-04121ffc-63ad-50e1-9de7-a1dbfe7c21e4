@@ -23,7 +23,8 @@ app.get('/api/health', (req, res) => {
  *   observations?                                            // 可选，试印核验观察（1～12 条；缺省/空数组不启用）
  * }
  * 响应：拼版清单 JSON（与前端「导出拼版清单 JSON」内容一致）；
- * 启用试印核验时顶层带 verification（观察、四种装订×翻转候选的评分与结论）。
+ * 启用试印核验时顶层带 verification（观察、四种装订×翻转候选的评分与结论；
+ * 结论为无法判定时另带下一处观察建议 suggestion）。
  */
 app.post('/api/impose', (req, res) => {
   try {
@@ -39,6 +40,13 @@ app.use('/api', (req, res) => {
 });
 
 const PORT = Number(process.env.PORT) || 8080;
-app.listen(PORT, () => {
-  console.log(`骑马钉拼版预演已启动: http://localhost:${PORT}`);
-});
+
+// 直接运行（node server.js / Docker CMD）时启动监听；被测试 require 时只导出 app，
+// Docker 启动方式（CMD node server.js）与本地 npm start 行为完全不变。
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`骑马钉拼版预演已启动: http://localhost:${PORT}`);
+  });
+}
+
+module.exports = { app };

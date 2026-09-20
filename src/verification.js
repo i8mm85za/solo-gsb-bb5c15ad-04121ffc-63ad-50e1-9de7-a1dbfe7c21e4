@@ -18,6 +18,14 @@
  * - 并列最优（含多个零差异） → undetermined（无法判定，返回全部并列组合，不强行推荐）；
  * - 唯一最优但仍有差异       → failed（验证未通过，给出最接近的组合与差异数）。
  *
+ * 无法判定时额外计算「下一处观察建议」（suggestNextObservation）：
+ * 遍历所有尚未观察的页位，取并列组合在该页位的期望（页码 / 空白 + 内容朝向），
+ * 按观察后可能形成的结果对并列组合分组，以「最坏情况下剩余并列候选数最少」
+ * （最大分组大小最小）为首要目标选出最有区分度的页位；并列时依次按
+ * 结果分组数更多 → 非空白结果更多 → 背面优先 → 帖 / 张 / 页位顺序（正先于背、
+ * 左先于右）确定唯一建议。建议包含定位与各并列组合的预期值；
+ * 所有页位都不能继续区分（或已无未观察页位）时明确返回 available:false。
+ *
  * 非法索引（帖 / 张越界）、重复观察（同一帖 / 张 / 面 / 页位）与非法字段值
  * 均抛出明确错误；无观察（缺省 / null / 空数组）时返回 { enabled: false }，原流程不变。
  */
@@ -231,6 +239,120 @@ function conclude(candidates, current, observationCount) {
 }
 
 /**
+ * 下一处观察建议（仅无法判定 / 并列最优时计算）。
+ *
+ * 遍历当前结果中所有「尚未观察」的页位（按 帖 → 张 → 正面 → 背面 → 左 → 右），
+ * 取每个并列组合在该页位的期望值（页码或空白、内容朝向）。观察该页位后，
+ * 并列组合会按观察可能得到的结果（期望签名）分组：
+ *   - 首要目标：最小化最坏情况下剩余候选数 = 最大分组的大小（minimax）；
+ *   - 并列时依次按：
+ *       1. 可形成的结果分组数更多（distinct 签名数）；
+ *       2. 非空白结果分组数更多（含真实页码的签名数）；
+ *       3. 背面优先于正面（背面携带翻转 / 装订信息，通常更有区分度）；
+ *       4. 帖号 → 张号 → 页位顺序（正先于背、左先于右，即枚举顺序）。
+ * 任一未观察页位能把并列组合区分开（分组数 ≥ 2）时给出唯一建议，
+ * 建议含定位（帖 / 张 / 面 / 页位）与各并列组合（按结论中的并列顺序）的预期值；
+ * 全部页位都不能继续区分或已无未观察页位时返回
+ * { available: false, reason, message }。
+ *
+ * @param {Array<{binding:string, flip:string}>} tiedCombos 并列组合（≥2）
+ * @param {Map<string, object>} layoutMap 组合键 -> 该组合重算的拼版结果
+ * @param {Array<object>} observations 已规范化的观察（仅用于排除已观察页位）
+ * @param {{signatureCount:number, sheetCounts:number[]}} structure
+ * @returns {object} 建议对象（available: true 时含 location / expectations 等）
+ */
+function suggestNextObservation(tiedCombos, layoutMap, observations, structure) {
+  const { signatureCount, sheetCounts } = structure;
+  const observedKeys = new Set(
+    observations.map((o) => `${o.signature}/${o.sheet}/${o.side}/${o.position}`)
+  );
+
+  let considered = 0;
+  let best = null;
+
+  // 枚举顺序即最终并列打破规则：帖 → 张 → 正面 → 背面 → 左 → 右
+  for (let signature = 1; signature <= signatureCount; signature += 1) {
+    for (let sheet = 1; sheet <= sheetCounts[signature - 1]; sheet += 1) {
+      for (const side of SIDE_VALUES) {
+        for (const position of POSITION_VALUES) {
+          if (observedKeys.has(`${signature}/${sheet}/${side}/${position}`)) continue;
+
+          const expectations = tiedCombos.map((combo) => {
+            const layout = layoutMap.get(`${combo.binding}/${combo.flip}`);
+            const slot = layout.signatures[signature - 1].sheets[sheet - 1][side][position];
+            const blank = slot.blank;
+            return {
+              binding: combo.binding,
+              flip: combo.flip,
+              tied: true,
+              blank,
+              page: blank ? null : slot.page,
+              orientation: blank ? null : expectedOrientation(side, combo.flip),
+            };
+          });
+
+          // 按观察可能得到的结果分组：空白统一为一个签名；非空白按 页码 + 朝向 分组
+          const groups = new Map();
+          expectations.forEach((exp) => {
+            const key = exp.blank ? 'blank' : `page:${exp.page}:${exp.orientation}`;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(exp);
+          });
+          const groupCount = groups.size;
+          const worstCaseRemaining = Math.max(...[...groups.values()].map((g) => g.length));
+          const nonBlankGroups = [...groups.keys()].filter((k) => k !== 'blank').length;
+          considered += 1;
+
+          if (groupCount < 2) continue; // 该页位无法继续区分并列组合
+          const score = { worstCaseRemaining, groupCount, nonBlankGroups, sideRank: side === 'back' ? 1 : 0 };
+          if (
+            !best
+            || score.worstCaseRemaining < best.score.worstCaseRemaining
+            || (score.worstCaseRemaining === best.score.worstCaseRemaining && score.groupCount > best.score.groupCount)
+            || (score.worstCaseRemaining === best.score.worstCaseRemaining && score.groupCount === best.score.groupCount
+              && score.nonBlankGroups > best.score.nonBlankGroups)
+            || (score.worstCaseRemaining === best.score.worstCaseRemaining && score.groupCount === best.score.groupCount
+              && score.nonBlankGroups === best.score.nonBlankGroups && score.sideRank > best.score.sideRank)
+            // side 也相同：枚举顺序天然保证帖 / 张 / 页位更靠前者先胜出，不替换
+          ) {
+            best = { signature, sheet, side, position, expectations, score };
+          }
+        }
+      }
+    }
+  }
+
+  if (considered === 0) {
+    return {
+      available: false,
+      reason: 'no-unobserved-slot',
+      message: '已无未观察页位：全部页位均已观察，但并列组合仍无法区分，请核对观察录入是否有误。',
+    };
+  }
+  if (!best) {
+    return {
+      available: false,
+      reason: 'indistinguishable',
+      message: '无更有区分度的观察位置：其余未观察页位在并列组合下结果均相同，再观察也无法继续区分。',
+    };
+  }
+
+  const { signature, sheet, side, position, expectations } = best;
+  const outcomeText = (exp) => {
+    if (exp.blank) return '空白';
+    return `第 ${exp.page} 页 · ${ORIENTATION_TEXT[exp.orientation]}`;
+  };
+  return {
+    available: true,
+    location: { signature, sheet, side, position },
+    expectations,
+    outcomeGroups: best.score.groupCount,
+    worstCaseRemaining: best.score.worstCaseRemaining,
+    message: `建议下一步观察：第 ${signature} 帖 · 第 ${sheet} 张 · ${SIDE_TEXT[side]} · ${POSITION_TEXT[position]}（最坏情况下也可把 ${expectations.length} 个并列组合缩减至 ${best.score.worstCaseRemaining} 个）。各组合预期：${expectations.map((e) => `${comboText(e)}→「${outcomeText(e)}」`).join('；')}。`,
+  };
+}
+
+/**
  * 在拼版结果上执行试印核验。
  *
  * @param {object} result               computeImposition 的基准结果（当前设置）
@@ -262,6 +384,8 @@ function attachVerification(result, rawObservations, recompute) {
 
   // 同一输入重算四种「装订 × 翻转」组合；核验只关心页码 / 空白 / 朝向，
   // 与纸张适配检查无关，重算时关闭适配输入以避免无谓的逐页位检查。
+  // 布局同时按组合键缓存：无法判定时供「下一处观察建议」复用，不重复重算。
+  const layoutMap = new Map();
   const candidates = COMBO_ORDER.map((combo) => {
     const layout = recompute({
       ...result.input,
@@ -274,10 +398,19 @@ function attachVerification(result, rawObservations, recompute) {
       bleedMm: 0,
       safetyMm: 0,
     });
+    layoutMap.set(`${combo.binding}/${combo.flip}`, layout);
     return scoreCandidate(combo, layout, observations);
   });
   rankCandidates(candidates, current);
   const conclusion = conclude(candidates, current, observations.length);
+
+  // 无法判定时计算下一处观察建议；其余结论不带 suggestion。
+  if (conclusion.status === 'undetermined') {
+    conclusion.suggestion = suggestNextObservation(conclusion.tied, layoutMap, observations, {
+      signatureCount: structure.signatureCount,
+      sheetCounts: structure.sheetCounts,
+    });
+  }
 
   return {
     enabled: true,
@@ -290,4 +423,4 @@ function attachVerification(result, rawObservations, recompute) {
   };
 }
 
-module.exports = { attachVerification, MAX_OBSERVATIONS, COMBO_ORDER };
+module.exports = { attachVerification, suggestNextObservation, MAX_OBSERVATIONS, COMBO_ORDER };

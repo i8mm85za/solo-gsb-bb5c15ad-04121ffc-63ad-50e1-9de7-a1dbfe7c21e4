@@ -380,6 +380,84 @@ td.fit-fail {
   font-size: 13px;
 }
 
+.verify-suggestion {
+  border: 1px solid #d9cff7;
+  background: #f5f2fe;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 10px;
+  font-size: 13.5px;
+}
+
+.verify-suggestion.none {
+  border-color: #e3e8f0;
+  background: #f4f6fa;
+}
+
+.verify-suggestion-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.badge.suggest {
+  margin-left: auto;
+  border: none;
+  background: #5f3dc4;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-family: inherit;
+  line-height: 1.4;
+  padding: 3px 12px;
+  user-select: none;
+}
+
+.badge.suggest:hover {
+  background: #4d2fb0;
+}
+
+.verify-suggestion-loc {
+  margin-top: 8px;
+  font-weight: 600;
+  color: #5f3dc4;
+  cursor: pointer;
+}
+
+.verify-suggestion-loc:hover {
+  text-decoration: underline;
+}
+
+.verify-suggestion-stats {
+  margin-top: 4px;
+  color: #5a6b85;
+  font-size: 12.5px;
+}
+
+.verify-suggestion-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.verify-suggestion-list li {
+  background: #fff;
+  border: 1px solid #e3ddf6;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.verify-suggestion.none .verify-suggestion-msg {
+  margin: 6px 0 0;
+  color: #5a6b85;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .verify-candidate {
   border: 1px solid #e3e8f0;
   border-radius: 8px;

@@ -597,6 +597,70 @@ function makeBadge(text, cls) {
   return span;
 }
 
+/** 建议中单个候选预期值的可读文本（空白页不带朝向）。 */
+function expectationText(exp) {
+  return `${BINDING_TEXT[exp.binding]} · ${FLIP_TEXT[exp.flip]}：${exp.blank ? '空白' : `第 ${exp.page} 页 · ${ORIENTATION_TEXT[exp.orientation]}`}`;
+}
+
+/**
+ * 渲染「下一处观察建议」卡片。
+ * 有建议：定位行 + 「查看建议」按钮（跳到对应纸张并高亮页位）+ 各候选预期值；
+ * 无建议（全部页位已观察 / 剩余页位无法区分）：明确提示，不提供按钮。
+ */
+function renderSuggestion(suggestion) {
+  const box = document.createElement('div');
+  box.className = 'verify-suggestion';
+  const head = document.createElement('div');
+  head.className = 'verify-suggestion-head';
+  const title = document.createElement('strong');
+  title.textContent = '下一处观察建议';
+  head.appendChild(title);
+
+  if (!suggestion || !suggestion.available) {
+    box.classList.add('none');
+    box.appendChild(head);
+    const note = document.createElement('p');
+    note.className = 'verify-suggestion-msg';
+    note.textContent = suggestion && suggestion.message
+      ? suggestion.message
+      : '无建议：所有未观察页位都无法继续区分并列组合。';
+    box.appendChild(note);
+    return box;
+  }
+
+  const loc = suggestion.location;
+  const badge = document.createElement('button');
+  badge.type = 'button';
+  badge.className = 'badge suggest';
+  badge.textContent = '查看建议';
+  badge.title = '跳到对应纸张并高亮页位';
+  badge.addEventListener('click', () => jumpToSlot(loc));
+  head.appendChild(badge);
+  box.appendChild(head);
+
+  const where = document.createElement('div');
+  where.className = 'verify-suggestion-loc';
+  where.textContent = `第 ${loc.signature} 帖 · 第 ${loc.sheet} 张 · ${SIDE_TEXT[loc.side]} · ${POSITION_TEXT[loc.position]}`;
+  where.title = '点击跳到对应纸张并高亮页位';
+  where.addEventListener('click', () => jumpToSlot(loc));
+  box.appendChild(where);
+
+  const stats = document.createElement('div');
+  stats.className = 'verify-suggestion-stats';
+  stats.textContent = `可能结果 ${suggestion.outcomeGroups} 种 · 最坏情况剩余 ${suggestion.worstCaseRemaining} 个候选`;
+  box.appendChild(stats);
+
+  const list = document.createElement('ul');
+  list.className = 'verify-suggestion-list';
+  suggestion.expectations.forEach((exp) => {
+    const li = document.createElement('li');
+    li.textContent = expectationText(exp);
+    list.appendChild(li);
+  });
+  box.appendChild(list);
+  return box;
+}
+
 function renderVerification() {
   const v = state.result && state.result.verification;
   verifyResult.innerHTML = '';
@@ -629,6 +693,11 @@ function renderVerification() {
     banner.appendChild(tiedLine);
   }
   verifyResult.appendChild(banner);
+
+  // 无法判定时的下一处观察建议（无建议时明确说明；有建议时可点击跳转到对应纸张并高亮页位）
+  if (c.status === 'undetermined') {
+    verifyResult.appendChild(renderSuggestion(c.suggestion));
+  }
 
   v.candidates.forEach((cand) => {
     const card = document.createElement('div');
