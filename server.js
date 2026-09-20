@@ -39,6 +39,12 @@ app.use('/api', (req, res) => {
 });
 
 const PORT = Number(process.env.PORT) || 8080;
-app.listen(PORT, () => {
-  console.log(`骑马钉拼版预演已启动: http://localhost:${PORT}`);
-});
+
+// 直接运行（node server.js / Docker CMD）时启动服务；被测试 require 时仅导出 app。
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`骑马钉拼版预演已启动: http://localhost:${PORT}`);
+  });
+}
+
+module.exports = { app, PORT };

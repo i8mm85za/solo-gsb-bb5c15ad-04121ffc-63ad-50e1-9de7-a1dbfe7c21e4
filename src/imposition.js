@@ -48,7 +48,9 @@ const { attachVerification } = require('./verification');
  * - 可选录入 1～12 条实物观察（帖 / 张 / 正背面 / 左右页位 / 看到的页码或空白 / 内容朝向），
  *   服务端用同一输入重算「左/右装订 × 长/短边翻转」四种设置并逐条比对，
  *   按「错误观察数最少 → 错误字段数最少 → 当前设置优先 → 固定组合顺序」排序候选；
- *   仅唯一零差异组合判定验证通过，并列最优时返回无法判定及并列组合（不强行推荐）。
+ *   仅唯一零差异组合判定验证通过，并列最优时返回无法判定及并列组合（不强行推荐），
+ *   并从未观察页位按「最坏剩余候选最少 → 结果分组最多 → 非空白 → 背面 →
+ *   帖/张/左→右 顺序」计算唯一的下一处观察建议（无页位可区分时明确为 null）。
  * - 非法索引、重复观察返回明确错误；无观察（缺省 / 空数组）时 verification 为
  *   { enabled: false }，原流程完全不变。
  */
@@ -437,7 +439,7 @@ function computeImposition(input) {
   const result = {
     meta: {
       app: 'saddle-stitch-imposition',
-      version: '1.5.0',
+      version: '1.6.0',
       generatedAt: new Date().toISOString(),
     },
     input: {

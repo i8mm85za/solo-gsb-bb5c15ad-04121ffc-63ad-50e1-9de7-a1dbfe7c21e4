@@ -520,18 +520,20 @@ async function runVerification() {
     state.result = data;
     rebuildFlat();
     state.idx = Math.min(state.idx, state.flat.length - 1);
+    // 重核后旧的定位高亮可能已指向被删除的观察，统一清除，避免与最新结果不同步
+    state.highlight = null;
     renderAll();
   } catch (err) {
     showObsError(`核验失败：${err.message}`);
   }
 }
 
-/** 跳到观察 / 差异对应的纸张并高亮页位。 */
-function jumpToSlot(target) {
+/** 跳到观察 / 差异 / 建议对应的纸张并高亮页位。 */
+function jumpToSlot(target, kind = 'locate') {
   const flatIdx = state.flat.findIndex((p) => p.si === target.signature - 1 && p.shi === target.sheet - 1);
   if (flatIdx < 0) return;
   state.idx = flatIdx;
-  state.highlight = { si: target.signature - 1, shi: target.sheet - 1, side: target.side, position: target.position };
+  state.highlight = { si: target.signature - 1, shi: target.sheet - 1, side: target.side, position: target.position, kind };
   renderSheetNav();
   draw();
   canvas.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -597,6 +599,67 @@ function makeBadge(text, cls) {
   return span;
 }
 
+/** 无法判定时展示服务端计算的「下一处观察建议」，点击跳到对应纸张并高亮页位。 */
+function renderSuggestion(suggestion) {
+  const box = document.createElement('div');
+  if (!suggestion) {
+    box.className = 'verify-suggestion none';
+    const head = document.createElement('div');
+    head.className = 'verify-suggestion-head';
+    head.innerHTML = '<strong>下一处观察建议</strong>';
+    box.appendChild(head);
+    const noLine = document.createElement('div');
+    noLine.className = 'verify-suggestion-none';
+    noLine.textContent = '无建议：剩余未观察页位在各并列组合下的预期完全一致，继续观察也无法区分，建议核对实物或调整拼版输入后重新生成。';
+    box.appendChild(noLine);
+    verifyResult.appendChild(box);
+    return;
+  }
+
+  box.className = 'verify-suggestion';
+  const head = document.createElement('div');
+  head.className = 'verify-suggestion-head';
+  const title = document.createElement('strong');
+  title.textContent = '下一处观察建议';
+  head.appendChild(title);
+  const jumpBtn = document.createElement('button');
+  jumpBtn.type = 'button';
+  jumpBtn.className = 'small-btn suggest-btn';
+  jumpBtn.textContent = '查看建议';
+  jumpBtn.addEventListener('click', () => jumpToSlot(suggestion, 'suggestion'));
+  head.appendChild(jumpBtn);
+  box.appendChild(head);
+
+  const loc = document.createElement('div');
+  loc.className = 'verify-suggestion-loc';
+  loc.textContent = `第 ${suggestion.signature} 帖 · 第 ${suggestion.sheet} 张 · ${SIDE_TEXT[suggestion.side]} · ${POSITION_TEXT[suggestion.position]}`;
+  box.appendChild(loc);
+  const metric = document.createElement('div');
+  metric.className = 'verify-suggestion-metric';
+  metric.textContent = `观察该页位可形成 ${suggestion.groupCount} 种结果；最坏情况下剩余 ${suggestion.worstRemainingCandidates} 种候选组合。`;
+  box.appendChild(metric);
+
+  // 按结果分组列出各并列组合的预期值（页码 / 空白 + 内容朝向）
+  const list = document.createElement('ul');
+  list.className = 'suggest-list';
+  suggestion.outcomeGroups.forEach((group) => {
+    const li = document.createElement('li');
+    const value = document.createElement('span');
+    value.className = 'suggest-value' + (group.blank ? ' blank' : '');
+    value.textContent = group.blank ? '空白' : `第 ${group.page} 页 · ${ORIENTATION_TEXT[group.orientation]}`;
+    li.appendChild(value);
+    const combos = document.createElement('span');
+    combos.className = 'suggest-combos';
+    combos.textContent = group.combinations
+      .map((cm) => `${BINDING_TEXT[cm.binding]} · ${FLIP_TEXT[cm.flip]}`)
+      .join('；');
+    li.appendChild(combos);
+    list.appendChild(li);
+  });
+  box.appendChild(list);
+  verifyResult.appendChild(box);
+}
+
 function renderVerification() {
   const v = state.result && state.result.verification;
   verifyResult.innerHTML = '';
@@ -629,6 +692,11 @@ function renderVerification() {
     banner.appendChild(tiedLine);
   }
   verifyResult.appendChild(banner);
+
+  // 无法判定时服务端给出的「下一处观察建议」；无可用页位时明确提示无建议
+  if (c.status === 'undetermined') {
+    renderSuggestion(v.nextSuggestion);
+  }
 
   v.candidates.forEach((cand) => {
     const card = document.createElement('div');
@@ -801,29 +869,31 @@ function draw() {
   drawSheet(ctx, backRect, sheet.back, { rotated: flip === 'long', isBack: true, ...drawOpts });
   drawFlipDiagram(ctx, { x: 530, y: top, w: 180, h: sheetH }, flip);
 
-  // 核验定位高亮：点击差异 / 观察后，在当前张对应页位画紫色描边
+  // 核验定位高亮：点击差异 / 观察 / 建议后，在当前张对应页位画紫色描边
   if (state.highlight && state.highlight.si === pos.si && state.highlight.shi === pos.shi) {
     const hRect = state.highlight.side === 'front' ? frontRect : backRect;
-    drawSlotHighlight(ctx, hRect, state.highlight.position);
+    drawSlotHighlight(ctx, hRect, state.highlight.position, state.highlight.kind === 'suggestion');
   }
 
   drawNotes(ctx, noteLines);
 }
 
-/** 核验定位高亮：在目标页位外画紫色圆角描边并标注。 */
-function drawSlotHighlight(ctx, sheetRect, position) {
+/** 核验定位高亮：在目标页位外画圆角描边并标注（建议 = 青色，普通定位 = 紫色）。 */
+function drawSlotHighlight(ctx, sheetRect, position, isSuggestion) {
   const rect = position === 'left'
     ? { x: sheetRect.x, y: sheetRect.y, w: sheetRect.w / 2, h: sheetRect.h }
     : { x: sheetRect.x + sheetRect.w / 2, y: sheetRect.y, w: sheetRect.w / 2, h: sheetRect.h };
+  const color = isSuggestion ? '#0f766e' : '#5f3dc4';
+  const label = isSuggestion ? '◆ 建议观察位' : '◆ 核验定位';
   ctx.save();
-  ctx.strokeStyle = '#5f3dc4';
+  ctx.strokeStyle = color;
   ctx.lineWidth = 4;
   roundRect(ctx, rect.x + 4, rect.y + 4, rect.w - 8, rect.h - 8, 6);
   ctx.stroke();
-  ctx.fillStyle = '#5f3dc4';
+  ctx.fillStyle = color;
   ctx.font = 'bold 14px system-ui, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('◆ 核验定位', rect.x + rect.w / 2, rect.y + 24);
+  ctx.fillText(label, rect.x + rect.w / 2, rect.y + 24);
   ctx.restore();
 }
 
